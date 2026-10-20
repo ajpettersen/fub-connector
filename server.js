@@ -58,7 +58,13 @@ const slimPerson = (p) => p && ({
 const slimNote = (n) => ({ id: n.id, created: n.created, createdBy: n.createdBy, subject: n.subject, body: n.body });
 const slimCall = (c) => ({ id: c.id, created: c.created, userName: c.userName, isIncoming: c.isIncoming, duration: c.duration, outcome: c.outcome, note: c.note });
 const slimText = (t) => ({ id: t.id, created: t.created, isIncoming: t.isIncoming, message: t.message });
-const slimTask = (t) => ({ id: t.id, personId: t.personId, name: t.name, type: t.type, dueDate: t.dueDate, isCompleted: t.isCompleted, assignedTo: t.assignedTo });
+const slimDeal = (d) => d && ({
+  id: d.id, name: d.name, status: d.status, pipelineId: d.pipelineId, pipelineName: d.pipelineName,
+  stageId: d.stageId, stageName: d.stageName, price: d.price, projectedCloseDate: d.projectedCloseDate,
+  commissionValue: d.commissionValue, agentCommission: d.agentCommission, teamCommission: d.teamCommission,
+  people: (d.people || []).map((p) => ({ id: p.id, name: p.name })), description: d.description,
+  enteredStageAt: d.enteredStageAt, createdAt: d.createdAt || d.created, updatedAt: d.updatedAt || d.updated
+});
 
 /* ---------------- Input checks ---------------- */
 
@@ -83,7 +89,6 @@ function need(args, key, type, { optional = false, min, max, pattern, oneOf } = 
 /* ---------------- Tools ---------------- */
 
 const OUTCOMES = ["Interested", "Not Interested", "Left Message", "No Answer", "Busy", "Bad Number"];
-const TASK_TYPES = ["Follow Up", "Call", "Email", "Text", "Showing", "Closing", "Open House", "Thank You"];
 const personId = { type: "integer", description: "Follow Up Boss contact id (from search_people)" };
 
 const tools = [
@@ -120,17 +125,127 @@ const tools = [
     }
   },
   {
-    name: "list_tasks",
-    description: "List Follow Up Boss tasks, optionally for one contact. Open tasks only unless includeCompleted is true.",
-    inputSchema: { type: "object", properties: { personId, includeCompleted: { type: "boolean" }, limit: { type: "integer", minimum: 1, maximum: 100 } } },
+    name: "recent_calls",
+    description: "Calls logged in Follow Up Boss across all contacts since a date (newest first), with the contact's name and any call notes. Use it to see what AJ logged.",
+    inputSchema: { type: "object", properties: { since: { type: "string", description: "YYYY-MM-DD" }, limit: { type: "integer", minimum: 1, maximum: 200 } }, required: ["since"] },
     annotations: { readOnlyHint: true },
     run: async (a) => {
-      const d = await fub("/tasks", { query: {
-        personId: need(a, "personId", "integer", { optional: true }),
-        isCompleted: need(a, "includeCompleted", "boolean", { optional: true }) ? undefined : "false",
-        limit: need(a, "limit", "integer", { optional: true, min: 1, max: 100 }) || 25, sort: "dueDate"
-      } });
-      return (d.tasks || []).map(slimTask);
+      const since = need(a, "since", "string", { pattern: /^\d{4}-\d{2}-\d{2}$/ });
+      const max = need(a, "limit", "integer", { optional: true, min: 1, max: 200 }) || 100;
+      const out = [];
+      for (let offset = 0; offset < 1000 && out.length < max; offset += 100) {
+        const d = await fub("/calls", { query: { sort: "-created", limit: 100, offset } });
+        const page = d.calls || [];
+        for (const c of page) { if ((c.created || "") < since) return out; out.push({ ...slimCall(c), personId: c.personId, name: c.name || c.personName }); if (out.length >= max) break; }
+        if (page.length < 100) break;
+      }
+      return out;
+    }
+  },
+  {
+    name: "recent_notes",
+    description: "Notes added in Follow Up Boss across all contacts since a date (newest first).",
+    inputSchema: { type: "object", properties: { since: { type: "string", description: "YYYY-MM-DD" }, limit: { type: "integer", minimum: 1, maximum: 200 } }, required: ["since"] },
+    annotations: { readOnlyHint: true },
+    run: async (a) => {
+      const since = need(a, "since", "string", { pattern: /^\d{4}-\d{2}-\d{2}$/ });
+      const max = need(a, "limit", "integer", { optional: true, min: 1, max: 200 }) || 100;
+      const out = [];
+      for (let offset = 0; offset < 1000 && out.length < max; offset += 100) {
+        const d = await fub("/notes", { query: { sort: "-created", limit: 100, offset } });
+        const page = d.notes || [];
+        for (const n of page) { if ((n.created || "") < since) return out; out.push({ ...slimNote(n), personId: n.personId }); if (out.length >= max) break; }
+        if (page.length < 100) break;
+      }
+      return out;
+    }
+  },
+  {
+    name: "list_smart_lists",
+    description: "AJ's Follow Up Boss smart lists (id and name), e.g. his 30/60/90-day sphere lists.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { readOnlyHint: true },
+    run: async () => {
+      const d = await fub("/smartLists", { query: { limit: 100 } });
+      return (d.smartlists || d.smartLists || []).map((s) => ({ id: s.id, name: s.name }));
+    }
+  },
+  {
+    name: "smart_list_people",
+    description: "The people currently in one Follow Up Boss smart list (who's due for follow-up), with last activity.",
+    inputSchema: { type: "object", properties: { smartListId: { type: "integer" }, limit: { type: "integer", minimum: 1, maximum: 200 } }, required: ["smartListId"] },
+    annotations: { readOnlyHint: true },
+    run: async (a) => {
+      const id = need(a, "smartListId", "integer");
+      const max = need(a, "limit", "integer", { optional: true, min: 1, max: 200 }) || 100;
+      const out = []; let total = null;
+      for (let offset = 0; offset < max; offset += 100) {
+        const d = await fub("/people", { query: { smartListId: id, limit: Math.min(100, max - offset), offset, sort: "lastActivity" } });
+        total = d._metadata?.total ?? total;
+        const page = d.people || [];
+        out.push(...page.map(slimPerson));
+        if (page.length < 100) break;
+      }
+      return { total: total ?? out.length, people: out };
+    }
+  },
+  {
+    name: "list_pipelines",
+    description: "Follow Up Boss deal pipelines and their stages (ids and names).",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { readOnlyHint: true },
+    run: async () => {
+      const d = await fub("/pipelines", { query: { limit: 100 } });
+      return (d.pipelines || []).map((p) => ({ id: p.id, name: p.name, stages: (p.stages || []).map((s) => ({ id: s.id, name: s.name })) }));
+    }
+  },
+  {
+    name: "list_deals",
+    description: "AJ's Follow Up Boss deals with stage, price, close date, commission and people. Optionally filter by pipeline or person.",
+    inputSchema: { type: "object", properties: { pipelineId: { type: "integer" }, personId, status: { type: "string", enum: ["Active", "Archived"] }, limit: { type: "integer", minimum: 1, maximum: 500 } } },
+    annotations: { readOnlyHint: true },
+    run: async (a) => {
+      const max = need(a, "limit", "integer", { optional: true, min: 1, max: 500 }) || 200;
+      const q = { pipelineId: need(a, "pipelineId", "integer", { optional: true }), personId: need(a, "personId", "integer", { optional: true }), status: need(a, "status", "string", { optional: true, oneOf: ["Active", "Archived"] }) };
+      const out = [];
+      for (let offset = 0; offset < max; offset += 100) {
+        const d = await fub("/deals", { query: { ...q, limit: Math.min(100, max - offset), offset, sort: "-updated" } });
+        const page = d.deals || [];
+        out.push(...page.map(slimDeal));
+        if (page.length < 100) break;
+      }
+      return out;
+    }
+  },
+  {
+    name: "get_deal",
+    description: "One Follow Up Boss deal by id, including every field Follow Up Boss returns.",
+    inputSchema: { type: "object", properties: { dealId: { type: "integer" } }, required: ["dealId"] },
+    annotations: { readOnlyHint: true },
+    run: async (a) => fub(`/deals/${need(a, "dealId", "integer")}`)
+  },
+  {
+    name: "save_deal",
+    description: "Create a deal (no dealId) or update one (dealId) in Follow Up Boss. Only the fields you pass are changed.",
+    inputSchema: { type: "object", properties: {
+      dealId: { type: "integer" }, name: { type: "string", maxLength: 200 }, stageId: { type: "integer" },
+      price: { type: "number" }, projectedCloseDate: { type: "string", description: "YYYY-MM-DD" },
+      commissionValue: { type: "number", description: "AJ's gross commission in dollars" },
+      peopleIds: { type: "array", items: { type: "integer" } }, description: { type: "string", maxLength: 2000 }
+    } },
+    write: true,
+    run: async (a) => {
+      const body = {};
+      const dealId = need(a, "dealId", "integer", { optional: true });
+      const name = need(a, "name", "string", { optional: true, max: 200 }); if (name) body.name = name;
+      const stageId = need(a, "stageId", "integer", { optional: true }); if (stageId) body.stageId = stageId;
+      for (const k of ["price", "commissionValue"]) { if (a[k] !== undefined && a[k] !== null) { if (typeof a[k] !== "number" || a[k] < 0) throw new InputError(`"${k}" must be a positive number.`); body[k] = a[k]; } }
+      const close = need(a, "projectedCloseDate", "string", { optional: true, pattern: /^\d{4}-\d{2}-\d{2}$/ }); if (close) body.projectedCloseDate = close;
+      const desc = need(a, "description", "string", { optional: true, max: 2000 }); if (desc) body.description = desc;
+      if (Array.isArray(a.peopleIds)) { if (!a.peopleIds.every(Number.isInteger)) throw new InputError('"peopleIds" must be whole numbers.'); body.peopleIds = a.peopleIds; }
+      if (!dealId && (!body.name || !body.stageId)) throw new InputError("A new deal needs a name and a stageId.");
+      if (dealId && !Object.keys(body).length) throw new InputError("Nothing to change.");
+      return slimDeal(await fub(dealId ? `/deals/${dealId}` : "/deals", { method: dealId ? "PUT" : "POST", body }));
     }
   },
   {
@@ -160,18 +275,6 @@ const tools = [
       if (!phone) throw new InputError("This contact has no phone number in Follow Up Boss. Use add_note instead, or pass a phone number.");
       return slimCall(await fub("/calls", { method: "POST", body: { personId: id, phone, note, outcome, isIncoming, duration: 0 } }));
     }
-  },
-  {
-    name: "create_task",
-    description: "Create a follow-up task on a contact in Follow Up Boss.",
-    inputSchema: { type: "object", properties: {
-      personId, name: { type: "string", maxLength: 200 }, dueDate: { type: "string", description: "YYYY-MM-DD" }, type: { type: "string", enum: TASK_TYPES }
-    }, required: ["personId", "name", "dueDate"] },
-    write: true,
-    run: async (a) => slimTask(await fub("/tasks", { method: "POST", body: {
-      personId: need(a, "personId", "integer"), name: need(a, "name", "string", { max: 200 }),
-      dueDate: need(a, "dueDate", "string", { pattern: /^\d{4}-\d{2}-\d{2}$/ }), type: need(a, "type", "string", { optional: true, oneOf: TASK_TYPES }) || "Follow Up"
-    } }))
   }
 ];
 const byName = new Map(tools.map((t) => [t.name, t]));
@@ -192,7 +295,7 @@ async function handle(msg) {
       return rpcResult(msg.id, {
         protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.0.0" },
+        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.1.0" },
         instructions: "Tools for AJ Pettersen's own Follow Up Boss account. Look people up with search_people before using an id." + (READ_ONLY ? " Read-only mode: write tools are turned off." : "")
       });
     }
