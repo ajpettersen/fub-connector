@@ -162,12 +162,22 @@ const tools = [
   },
   {
     name: "list_smart_lists",
-    description: "AJ's Follow Up Boss smart lists (id and name), e.g. his 30/60/90-day sphere lists.",
-    inputSchema: { type: "object", properties: {} },
+    description: "AJ's Follow Up Boss smart lists (id and name), e.g. his 30/60/90-day sphere lists. Optionally filter by part of the name.",
+    inputSchema: { type: "object", properties: { name: { type: "string", description: "Only lists whose name contains this text (case-insensitive), e.g. \"sphere\"" } } },
     annotations: { readOnlyHint: true },
-    run: async () => {
-      const d = await fub("/smartLists", { query: { limit: 100 } });
-      return (d.smartlists || d.smartLists || []).map((s) => ({ id: s.id, name: s.name }));
+    run: async (a = {}) => {
+      // all=true asks Follow Up Boss for every smart list on the account, not only the
+      // ones visible to the API key's user, so personal lists like "30 Day Sphere" show up.
+      const seen = new Map();
+      for (let offset = 0; offset < 1000; offset += 100) {
+        const d = await fub("/smartLists", { query: { limit: 100, offset, all: true } });
+        const page = d.smartlists || d.smartLists || [];
+        for (const s of page) if (!seen.has(s.id)) seen.set(s.id, { id: s.id, name: s.name });
+        if (page.length < 100) break;
+      }
+      const filter = typeof a.name === "string" ? a.name.trim().toLowerCase() : "";
+      const lists = [...seen.values()];
+      return filter ? lists.filter((s) => String(s.name || "").toLowerCase().includes(filter)) : lists;
     }
   },
   {
