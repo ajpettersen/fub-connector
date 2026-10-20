@@ -271,7 +271,7 @@ const tools = [
   },
   {
     name: "save_deal",
-    description: "Create a deal (no dealId) or update one (dealId) in Follow Up Boss. Only the fields you pass are changed.",
+    description: "Create a deal (no dealId) or update one (dealId) in Follow Up Boss. New deals are assigned to AJ. Only the fields you pass are changed.",
     inputSchema: { type: "object", properties: {
       dealId: { type: "integer" }, name: { type: "string", maxLength: 200 }, stageId: { type: "integer" },
       price: { type: "number" }, projectedCloseDate: { type: "string", description: "YYYY-MM-DD" },
@@ -289,6 +289,7 @@ const tools = [
       const desc = need(a, "description", "string", { optional: true, max: 2000 }); if (desc) body.description = desc;
       if (Array.isArray(a.peopleIds)) { if (!a.peopleIds.every(Number.isInteger)) throw new InputError('"peopleIds" must be whole numbers.'); body.peopleIds = a.peopleIds; }
       if (!dealId && (!body.name || !body.stageId)) throw new InputError("A new deal needs a name and a stageId.");
+      if (!dealId) body.userIds = [(await me()).id]; // new deals are always assigned to AJ
       if (dealId && !Object.keys(body).length) throw new InputError("Nothing to change.");
       return slimDeal(await fub(dealId ? `/deals/${dealId}` : "/deals", { method: dealId ? "PUT" : "POST", body }));
     }
