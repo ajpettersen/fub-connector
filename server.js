@@ -48,6 +48,9 @@ async function fub(path, { method = "GET", query, body } = {}) {
   return data;
 }
 
+let meCache = null;
+async function me() { if (!meCache) { const m = await fub("/me"); meCache = { id: m.id, name: m.name || [m.firstName, m.lastName].filter(Boolean).join(" "), email: m.email }; } return meCache; }
+
 const values = (arr) => (Array.isArray(arr) ? arr.map((x) => x?.value).filter(Boolean) : []);
 const slimPerson = (p) => p && ({
   id: p.id, name: p.name || [p.firstName, p.lastName].filter(Boolean).join(" "),
@@ -62,7 +65,8 @@ const slimDeal = (d) => d && ({
   id: d.id, name: d.name, status: d.status, pipelineId: d.pipelineId, pipelineName: d.pipelineName,
   stageId: d.stageId, stageName: d.stageName, price: d.price, projectedCloseDate: d.projectedCloseDate,
   commissionValue: d.commissionValue, agentCommission: d.agentCommission, teamCommission: d.teamCommission,
-  people: (d.people || []).map((p) => ({ id: p.id, name: p.name })), description: d.description,
+  people: (d.people || []).map((p) => ({ id: p.id, name: p.name })),
+  users: (d.users || d.assignedUsers || []).map((u) => ({ id: u.id, name: u.name })), description: d.description,
   enteredStageAt: d.enteredStageAt, createdAt: d.createdAt || d.created, updatedAt: d.updatedAt || d.updated
 });
 
@@ -201,21 +205,34 @@ const tools = [
   },
   {
     name: "list_deals",
-    description: "AJ's Follow Up Boss deals with stage, price, close date, commission and people. Optionally filter by pipeline or person.",
-    inputSchema: { type: "object", properties: { pipelineId: { type: "integer" }, personId, status: { type: "string", enum: ["Active", "Archived"] }, limit: { type: "integer", minimum: 1, maximum: 500 } } },
+    description: "Follow Up Boss deals with stage, price, close date, commission, people and assigned agents. This account is shared with AJ's team: pass mine=true to get only deals AJ is assigned to. Optionally filter by pipeline or person.",
+    inputSchema: { type: "object", properties: { mine: { type: "boolean", description: "Only deals assigned to AJ (the API key's user)" }, pipelineId: { type: "integer" }, personId, status: { type: "string", enum: ["Active", "Archived"] }, limit: { type: "integer", minimum: 1, maximum: 3000 } } },
     annotations: { readOnlyHint: true },
     run: async (a) => {
-      const max = need(a, "limit", "integer", { optional: true, min: 1, max: 500 }) || 200;
+      const max = need(a, "limit", "integer", { optional: true, min: 1, max: 3000 }) || 500;
+      const mine = need(a, "mine", "boolean", { optional: true });
       const q = { pipelineId: need(a, "pipelineId", "integer", { optional: true }), personId: need(a, "personId", "integer", { optional: true }), status: need(a, "status", "string", { optional: true, oneOf: ["Active", "Archived"] }) };
+      const self = mine ? await me() : null;
       const out = [];
-      for (let offset = 0; offset < max; offset += 100) {
-        const d = await fub("/deals", { query: { ...q, limit: Math.min(100, max - offset), offset, sort: "-updated" } });
+      for (let offset = 0; offset < 5000 && out.length < max; offset += 100) {
+        const d = await fub("/deals", { query: { ...q, limit: 100, offset, sort: "-updated" } });
         const page = d.deals || [];
-        out.push(...page.map(slimDeal));
+        for (const raw of page) {
+          const deal = slimDeal(raw);
+          if (self && !deal.users.some((u) => u.id === self.id || (u.name && self.name && u.name.toLowerCase() === self.name.toLowerCase()))) continue;
+          out.push(deal); if (out.length >= max) break;
+        }
         if (page.length < 100) break;
       }
       return out;
     }
+  },
+  {
+    name: "whoami",
+    description: "The Follow Up Boss user this connector acts as (AJ): id, name, email.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { readOnlyHint: true },
+    run: async () => me()
   },
   {
     name: "get_deal",
@@ -295,7 +312,7 @@ async function handle(msg) {
       return rpcResult(msg.id, {
         protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.1.0" },
+        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.2.0" },
         instructions: "Tools for AJ Pettersen's own Follow Up Boss account. Look people up with search_people before using an id." + (READ_ONLY ? " Read-only mode: write tools are turned off." : "")
       });
     }
