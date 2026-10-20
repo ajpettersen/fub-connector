@@ -1,0 +1,14 @@
+{
+  "name": "fub-connector",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AJ's private Follow Up Boss connector for Claude (MCP over HTTP, no dependencies)",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
