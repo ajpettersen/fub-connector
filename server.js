@@ -74,7 +74,9 @@ const slimDeal = (d) => d && ({
 
 class InputError extends Error {}
 function need(args, key, type, { optional = false, min, max, pattern, oneOf } = {}) {
-  const v = args?.[key];
+  let v = args?.[key];
+  // Some clients send booleans as text ("true"/"false"); accept those.
+  if (type === "boolean" && typeof v === "string" && /^(true|false)$/i.test(v.trim())) v = v.trim().toLowerCase() === "true";
   if (v === undefined || v === null || v === "") {
     if (optional) return undefined;
     throw new InputError(`Missing required "${key}".`);
