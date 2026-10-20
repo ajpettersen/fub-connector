@@ -186,21 +186,39 @@ const tools = [
   },
   {
     name: "smart_list_people",
-    description: "The people currently in one Follow Up Boss smart list (who's due for follow-up), with last activity.",
-    inputSchema: { type: "object", properties: { smartListId: { type: "integer" }, limit: { type: "integer", minimum: 1, maximum: 200 } }, required: ["smartListId"] },
+    description: "The people currently in one Follow Up Boss smart list (who's due for follow-up), with last activity. AJ is an admin, so lists show the whole team: pass mine=true to get only people assigned to AJ.",
+    inputSchema: { type: "object", properties: { smartListId: { type: "integer" }, mine: { type: "boolean", description: "Only people assigned to AJ (the API key's user)" }, limit: { type: "integer", minimum: 1, maximum: 200 } }, required: ["smartListId"] },
     annotations: { readOnlyHint: true },
     run: async (a) => {
       const id = need(a, "smartListId", "integer");
       const max = need(a, "limit", "integer", { optional: true, min: 1, max: 200 }) || 100;
-      const out = []; let total = null;
-      for (let offset = 0; offset < max; offset += 100) {
-        const d = await fub("/people", { query: { smartListId: id, limit: Math.min(100, max - offset), offset, sort: "lastActivity" } });
-        total = d._metadata?.total ?? total;
-        const page = d.people || [];
-        out.push(...page.map(slimPerson));
-        if (page.length < 100) break;
+      const mine = need(a, "mine", "boolean", { optional: true });
+      if (!mine) {
+        const out = []; let total = null;
+        for (let offset = 0; offset < max; offset += 100) {
+          const d = await fub("/people", { query: { smartListId: id, limit: Math.min(100, max - offset), offset, sort: "lastActivity" } });
+          total = d._metadata?.total ?? total;
+          const page = d.people || [];
+          out.push(...page.map(slimPerson));
+          if (page.length < 100) break;
+        }
+        return { total: total ?? out.length, people: out };
       }
-      return { total: total ?? out.length, people: out };
+      // mine=true: ask Follow Up Boss to filter by assigned user, and also check each person
+      // ourselves, so the result is right even if the API ignores the filter. We scan the
+      // whole list (up to 5,000 people) so the total counts only AJ's people.
+      const self = await me();
+      const isMine = (p) => p.assignedUserId === self.id ||
+        (p.assignedTo && self.name && String(p.assignedTo).toLowerCase() === self.name.toLowerCase());
+      const out = []; let count = 0; let scanned = 0; let complete = false;
+      for (let offset = 0; offset < 5000; offset += 100) {
+        const d = await fub("/people", { query: { smartListId: id, assignedUserId: self.id, limit: 100, offset, sort: "lastActivity" } });
+        const page = d.people || [];
+        scanned += page.length;
+        for (const p of page) if (isMine(p)) { count++; if (out.length < max) out.push(slimPerson(p)); }
+        if (page.length < 100) { complete = true; break; }
+      }
+      return { assignedTo: self.name, total: count, totalIsExact: complete, scanned, people: out };
     }
   },
   {
