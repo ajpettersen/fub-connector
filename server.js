@@ -51,6 +51,18 @@ async function fub(path, { method = "GET", query, body } = {}) {
 let meCache = null;
 async function me() { if (!meCache) { const m = await fub("/me"); meCache = { id: m.id, name: m.name || [m.firstName, m.lastName].filter(Boolean).join(" "), email: m.email }; } return meCache; }
 
+
+// Follow Up Boss blocks deep offsets; page with its "next" cursor instead.
+async function* pages(path, query) {
+  let next = null;
+  for (let i = 0; i < 60; i++) {
+    const d = await fub(path, { query: next ? { ...query, offset: undefined, next } : query });
+    yield d;
+    next = d?._metadata?.next || null;
+    if (!next) break;
+  }
+}
+
 const values = (arr) => (Array.isArray(arr) ? arr.map((x) => x?.value).filter(Boolean) : []);
 const slimPerson = (p) => p && ({
   id: p.id, name: p.name || [p.firstName, p.lastName].filter(Boolean).join(" "),
@@ -137,8 +149,7 @@ const tools = [
       const since = need(a, "since", "string", { pattern: /^\d{4}-\d{2}-\d{2}$/ });
       const max = need(a, "limit", "integer", { optional: true, min: 1, max: 200 }) || 100;
       const out = [];
-      for (let offset = 0; offset < 1000 && out.length < max; offset += 100) {
-        const d = await fub("/calls", { query: { sort: "-created", limit: 100, offset } });
+      for await (const d of pages("/calls", { sort: "-created", limit: 100 })) {
         const page = d.calls || [];
         for (const c of page) { if ((c.created || "") < since) return out; out.push({ ...slimCall(c), personId: c.personId, name: c.name || c.personName }); if (out.length >= max) break; }
         if (page.length < 100) break;
@@ -155,8 +166,7 @@ const tools = [
       const since = need(a, "since", "string", { pattern: /^\d{4}-\d{2}-\d{2}$/ });
       const max = need(a, "limit", "integer", { optional: true, min: 1, max: 200 }) || 100;
       const out = [];
-      for (let offset = 0; offset < 1000 && out.length < max; offset += 100) {
-        const d = await fub("/notes", { query: { sort: "-created", limit: 100, offset } });
+      for await (const d of pages("/notes", { sort: "-created", limit: 100 })) {
         const page = d.notes || [];
         for (const n of page) { if ((n.created || "") < since) return out; out.push({ ...slimNote(n), personId: n.personId }); if (out.length >= max) break; }
         if (page.length < 100) break;
@@ -242,15 +252,13 @@ const tools = [
       const q = { pipelineId: need(a, "pipelineId", "integer", { optional: true }), personId: need(a, "personId", "integer", { optional: true }), status: need(a, "status", "string", { optional: true, oneOf: ["Active", "Archived"] }) };
       const self = mine ? await me() : null;
       const out = [];
-      for (let offset = 0; offset < 5000 && out.length < max; offset += 100) {
-        const d = await fub("/deals", { query: { ...q, limit: 100, offset, sort: "-updated" } });
-        const page = d.deals || [];
-        for (const raw of page) {
+      for await (const d of pages("/deals", { ...q, limit: 100, sort: "-updated" })) {
+        for (const raw of d.deals || []) {
           const deal = slimDeal(raw);
           if (self && !deal.users.some((u) => u.id === self.id || (u.name && self.name && u.name.toLowerCase() === self.name.toLowerCase()))) continue;
           out.push(deal); if (out.length >= max) break;
         }
-        if (page.length < 100) break;
+        if (out.length >= max || (d.deals || []).length < 100) break;
       }
       return out;
     }
