@@ -6,15 +6,16 @@ A small private service that lets Claude read and write AJ's own Follow Up Boss 
 
 | Tool | What it does |
 |---|---|
-| `search_people` | Find contacts by name, email or phone |
+| `search_people` | Find contacts by name, email or phone, or everyone with a tag (e.g. PieDay2025) |
 | `get_person` | One contact's details |
 | `get_recent_activity` | Recent notes, calls and texts, plus the date of the latest touch |
 | `list_tasks` | Open tasks, for everyone or one contact |
 | `add_note` | Add a note to a contact |
 | `log_call` | Log a call with a note and outcome |
 | `create_task` | Create a follow-up task with a due date |
+| `update_person_tags` | Add tags to a contact. Existing tags are always kept |
 
-It never deletes anything. Set `READ_ONLY=true` to switch off the three write tools.
+It never deletes anything, and never removes a tag. Set `READ_ONLY=true` to switch off the write tools.
 
 ## Deploy on Railway
 

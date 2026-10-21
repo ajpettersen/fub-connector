@@ -102,6 +102,19 @@ function need(args, key, type, { optional = false, min, max, pattern, oneOf } = 
   return v;
 }
 
+// A list of Follow Up Boss tags: non-empty text, no commas (Follow Up Boss splits on them).
+function tagList(args, key, { optional = false } = {}) {
+  const v = args?.[key];
+  if (v === undefined || v === null || (Array.isArray(v) && !v.length)) {
+    if (optional) return undefined;
+    throw new InputError(`Missing required "${key}".`);
+  }
+  if (!Array.isArray(v) || v.length > 20) throw new InputError(`"${key}" must be a list of up to 20 tags.`);
+  const out = [...new Set(v.map((t) => (typeof t === "string" ? t.trim() : "")))];
+  if (out.some((t) => !t || t.length > 100 || t.includes(","))) throw new InputError(`Each of "${key}" must be text up to 100 characters, without commas.`);
+  return out;
+}
+
 /* ---------------- Tools ---------------- */
 
 const OUTCOMES = ["Interested", "Not Interested", "Left Message", "No Answer", "Busy", "Bad Number"];
@@ -110,12 +123,31 @@ const personId = { type: "integer", description: "Follow Up Boss contact id (fro
 const tools = [
   {
     name: "search_people",
-    description: "Search AJ's Follow Up Boss contacts by name, email or phone. Returns id, stage, contact info and last activity, most recently active first.",
-    inputSchema: { type: "object", properties: { query: { type: "string", description: "Name, email or phone" }, limit: { type: "integer", minimum: 1, maximum: 50 } }, required: ["query"] },
+    description: "Search AJ's Follow Up Boss contacts by name, email or phone, and/or by tag (e.g. everyone tagged PieDay2025). Returns id, stage, tags, contact info and last activity, most recently active first.",
+    inputSchema: { type: "object", properties: {
+      query: { type: "string", description: "Name, email or phone" },
+      tags: { type: "array", items: { type: "string" }, description: "Only contacts with all of these tags, e.g. [\"PieDay2025\"]" },
+      limit: { type: "integer", minimum: 1, maximum: 500, description: "Default 10, or 200 when filtering by tag" }
+    } },
     annotations: { readOnlyHint: true },
     run: async (a) => {
-      const d = await fub("/people", { query: { q: need(a, "query", "string", { max: 200 }), limit: need(a, "limit", "integer", { optional: true, min: 1, max: 50 }) || 10, sort: "-lastActivity" } });
-      return (d.people || []).map(slimPerson);
+      const q = need(a, "query", "string", { optional: true, max: 200 });
+      const tags = tagList(a, "tags", { optional: true });
+      if (!q && !tags) throw new InputError('Pass a "query", "tags", or both.');
+      const max = need(a, "limit", "integer", { optional: true, min: 1, max: 500 }) || (tags ? 200 : 10);
+      // Check each person's tags ourselves too, so the result is right even if the API
+      // ignores the filter. Tags match case-insensitively, like they do in Follow Up Boss.
+      const want = (tags || []).map((t) => t.toLowerCase());
+      const hasTags = (p) => want.every((t) => (p.tags || []).some((x) => String(x).toLowerCase() === t));
+      const out = []; let total = null; let scanned = 0;
+      for await (const d of pages("/people", { q, tags: tags?.join(","), limit: Math.min(100, max), sort: "-lastActivity" })) {
+        total = d._metadata?.total ?? total;
+        const page = d.people || [];
+        scanned += page.length;
+        for (const p of page) { if (hasTags(p)) out.push(slimPerson(p)); if (out.length >= max) break; }
+        if (out.length >= max || page.length < Math.min(100, max) || (tags && scanned >= 5000)) break;
+      }
+      return tags ? { total: total ?? out.length, returned: out.length, people: out } : out;
     }
   },
   {
@@ -305,6 +337,27 @@ const tools = [
     }
   },
   {
+    name: "update_person_tags",
+    description: "Add tags to a contact in Follow Up Boss (e.g. PieDay2025). Existing tags are always kept; this never removes a tag. Only use it when AJ asks to tag someone.",
+    inputSchema: { type: "object", properties: { personId, tags: { type: "array", items: { type: "string" }, description: "Tags to add, e.g. [\"PieDay2025\"]" } }, required: ["personId", "tags"] },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    write: true,
+    run: async (a) => {
+      const id = need(a, "personId", "integer");
+      const add = tagList(a, "tags");
+      // A plain PUT replaces every tag on the contact. mergeTags=true tells Follow Up Boss to
+      // add instead, and we also send the existing tags, so nothing is lost even if it were ignored.
+      const before = (await fub(`/people/${id}`)).tags || [];
+      const lower = new Set(before.map((t) => String(t).toLowerCase()));
+      const added = add.filter((t) => !lower.has(t.toLowerCase()));
+      if (!added.length) return { personId: id, added: [], tags: before, note: "The contact already had these tags." };
+      const after = await fub(`/people/${id}`, { method: "PUT", query: { mergeTags: true }, body: { tags: [...before, ...added] } });
+      const missing = before.filter((t) => !(after.tags || []).includes(t));
+      if (missing.length) throw new Error(`Follow Up Boss dropped existing tags: ${missing.join(", ")}. Check this contact.`);
+      return { personId: id, added, tags: after.tags || [] };
+    }
+  },
+  {
     name: "add_note",
     description: "Add a note to a contact in Follow Up Boss.",
     inputSchema: { type: "object", properties: { personId, subject: { type: "string", maxLength: 200 }, body: { type: "string", maxLength: 5000 } }, required: ["personId", "body"] },
@@ -351,7 +404,7 @@ async function handle(msg) {
       return rpcResult(msg.id, {
         protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.2.0" },
+        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.3.0" },
         instructions: "Tools for AJ Pettersen's own Follow Up Boss account. Look people up with search_people before using an id." + (READ_ONLY ? " Read-only mode: write tools are turned off." : "")
       });
     }
