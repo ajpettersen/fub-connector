@@ -284,7 +284,8 @@ const tools = [
       dealId: { type: "integer" }, name: { type: "string", maxLength: 200 }, stageId: { type: "integer" },
       price: { type: "number" }, projectedCloseDate: { type: "string", description: "YYYY-MM-DD" },
       commissionValue: { type: "number", description: "AJ's gross commission in dollars" },
-      peopleIds: { type: "array", items: { type: "integer" } }, description: { type: "string", maxLength: 2000 }
+      peopleIds: { type: "array", items: { type: "integer" } }, description: { type: "string", maxLength: 2000 },
+      status: { type: "string", enum: ["Active", "Archived"], description: "Archive a duplicate deal (reversible) or restore one" }
     } },
     write: true,
     run: async (a) => {
@@ -295,6 +296,7 @@ const tools = [
       for (const k of ["price", "commissionValue"]) { if (a[k] !== undefined && a[k] !== null) { if (typeof a[k] !== "number" || a[k] < 0) throw new InputError(`"${k}" must be a positive number.`); body[k] = a[k]; } }
       const close = need(a, "projectedCloseDate", "string", { optional: true, pattern: /^\d{4}-\d{2}-\d{2}$/ }); if (close) body.projectedCloseDate = close;
       const desc = need(a, "description", "string", { optional: true, max: 2000 }); if (desc) body.description = desc;
+      const st = need(a, "status", "string", { optional: true, oneOf: ["Active", "Archived"] }); if (st) body.status = st;
       if (Array.isArray(a.peopleIds)) { if (!a.peopleIds.every(Number.isInteger)) throw new InputError('"peopleIds" must be whole numbers.'); body.peopleIds = a.peopleIds; }
       if (!dealId && (!body.name || !body.stageId)) throw new InputError("A new deal needs a name and a stageId.");
       if (!dealId) body.userIds = [(await me()).id]; // new deals are always assigned to AJ
