@@ -123,30 +123,52 @@ const personId = { type: "integer", description: "Follow Up Boss contact id (fro
 const tools = [
   {
     name: "search_people",
-    description: "Search AJ's Follow Up Boss contacts by name, email or phone, and/or by tag (e.g. everyone tagged PieDay2025). Returns id, stage, tags, contact info and last activity, most recently active first.",
+    description: "Search AJ's Follow Up Boss contacts by name, email or phone, by tag (e.g. everyone tagged PieDay2025), and/or by when they were added. This account is shared with AJ's team: pass mine=true to get only contacts assigned to AJ, with an exact count. Returns id, stage, tags, contact info and last activity, most recently active first (newest first when createdSince is used).",
     inputSchema: { type: "object", properties: {
       query: { type: "string", description: "Name, email or phone" },
       tags: { type: "array", items: { type: "string" }, description: "Only contacts with all of these tags, e.g. [\"PieDay2025\"]" },
-      limit: { type: "integer", minimum: 1, maximum: 500, description: "Default 10, or 200 when filtering by tag" }
+      mine: { type: "boolean", description: "Only contacts assigned to AJ (the API key's user)" },
+      createdSince: { type: "string", description: "YYYY-MM-DD: only contacts added to Follow Up Boss on or after this date" },
+      limit: { type: "integer", minimum: 1, maximum: 2000, description: "Default 10, or 200 when filtering by tag, mine or createdSince" }
     } },
     annotations: { readOnlyHint: true },
     run: async (a) => {
       const q = need(a, "query", "string", { optional: true, max: 200 });
       const tags = tagList(a, "tags", { optional: true });
-      if (!q && !tags) throw new InputError('Pass a "query", "tags", or both.');
-      const max = need(a, "limit", "integer", { optional: true, min: 1, max: 500 }) || (tags ? 200 : 10);
-      // Check each person's tags ourselves too, so the result is right even if the API
-      // ignores the filter. Tags match case-insensitively, like they do in Follow Up Boss.
+      const mine = need(a, "mine", "boolean", { optional: true }) === true;
+      const since = need(a, "createdSince", "string", { optional: true, pattern: /^\d{4}-\d{2}-\d{2}$/ });
+      if (!q && !tags && !mine && !since) throw new InputError('Pass a "query", "tags", "mine" or "createdSince".');
+      const filtered = !!(tags || mine || since);
+      const max = need(a, "limit", "integer", { optional: true, min: 1, max: 2000 }) || (filtered ? 200 : 10);
+      const self = mine ? await me() : null;
+      // Check each filter ourselves too, so the result is right even if the API ignores one.
+      // Tags match case-insensitively, like they do in Follow Up Boss.
       const want = (tags || []).map((t) => t.toLowerCase());
       const hasTags = (p) => want.every((t) => (p.tags || []).some((x) => String(x).toLowerCase() === t));
-      const out = []; let total = null; let scanned = 0;
-      for await (const d of pages("/people", { q, tags: tags?.join(","), limit: Math.min(100, max), sort: "-lastActivity" })) {
+      const isMine = (p) => !self || p.assignedUserId === self.id ||
+        (p.assignedTo && self.name && String(p.assignedTo).toLowerCase() === self.name.toLowerCase());
+      const isNew = (p) => !since || (p.created || "").slice(0, 10) >= since;
+      const query = { q, tags: tags?.join(","), limit: 100, sort: since ? "-created" : "-lastActivity" };
+      if (self) query.assignedUserId = self.id;
+      const out = []; let total = null; let count = 0; let scanned = 0; let complete = false;
+      for await (const d of pages("/people", query)) {
         total = d._metadata?.total ?? total;
         const page = d.people || [];
         scanned += page.length;
-        for (const p of page) { if (hasTags(p)) out.push(slimPerson(p)); if (out.length >= max) break; }
-        if (out.length >= max || page.length < Math.min(100, max) || (tags && scanned >= 5000)) break;
+        for (const p of page) {
+          if (hasTags(p) && isMine(p) && isNew(p)) { count++; if (out.length < max) out.push(slimPerson(p)); }
+        }
+        // Newest-first: once a page ends before the cutoff, nothing older can match. Only trust
+        // this when the page really is in newest-first order, in case the API ignored the sort.
+        const created = page.map((p) => p.created || "");
+        const newestFirst = created.every((c, i) => i === 0 || c <= created[i - 1]);
+        const pastSince = since && newestFirst && created.length && created[created.length - 1].slice(0, 10) < since;
+        if (pastSince || page.length < 100) { complete = true; break; }
+        // Without mine/createdSince, stop once we have enough; with them keep scanning so the count is exact.
+        if (!mine && !since && out.length >= max) break;
+        if (scanned >= 6000) break;
       }
+      if (mine || since) return { assignedTo: self?.name, total: count, totalIsExact: complete, returned: out.length, people: out };
       return tags ? { total: total ?? out.length, returned: out.length, people: out } : out;
     }
   },
@@ -404,7 +426,7 @@ async function handle(msg) {
       return rpcResult(msg.id, {
         protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.3.0" },
+        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.4.0" },
         instructions: "Tools for AJ Pettersen's own Follow Up Boss account. Look people up with search_people before using an id." + (READ_ONLY ? " Read-only mode: write tools are turned off." : "")
       });
     }
