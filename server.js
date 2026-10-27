@@ -28,7 +28,26 @@ if (CONNECTOR_TOKEN.length < 24) {
 async function fub(path, { method = "GET", query, body } = {}) {
   const url = new URL(FUB_BASE + path);
   if (query) for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
-  const res = await fetch(url, {
+  // Follow Up Boss rate-limits requests (HTTP 429). Wait as long as it asks, then retry.
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    res = await fetchOnce(url, method, body);
+    if (res.status !== 429 || attempt >= 6) break;
+    const wait = Number(res.headers.get("retry-after"));
+    await new Promise((r) => setTimeout(r, (Number.isFinite(wait) && wait > 0 ? Math.min(wait, 30) : 5 * (attempt + 1)) * 1000));
+  }
+  const text = await res.text();
+  let data;
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (!res.ok) {
+    const msg = data?.errorMessage || data?.message || text || res.statusText;
+    throw new Error(`Follow Up Boss returned ${res.status}: ${String(msg).slice(0, 300)}`);
+  }
+  return data;
+}
+
+function fetchOnce(url, method, body) {
+  return fetch(url, {
     method,
     headers: {
       Authorization: "Basic " + Buffer.from(FUB_API_KEY + ":").toString("base64"),
@@ -38,14 +57,6 @@ async function fub(path, { method = "GET", query, body } = {}) {
     },
     body: body ? JSON.stringify(body) : undefined
   });
-  const text = await res.text();
-  let data;
-  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-  if (!res.ok) {
-    const msg = data?.errorMessage || data?.message || text || res.statusText;
-    throw new Error(`Follow Up Boss returned ${res.status}: ${String(msg).slice(0, 300)}`);
-  }
-  return data;
 }
 
 let meCache = null;
@@ -463,7 +474,7 @@ async function handle(msg) {
       return rpcResult(msg.id, {
         protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.5.0" },
+        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.5.1" },
         instructions: "Tools for AJ Pettersen's own Follow Up Boss account. Look people up with search_people before using an id." + (READ_ONLY ? " Read-only mode: write tools are turned off." : "")
       });
     }
