@@ -360,23 +360,60 @@ const tools = [
   },
   {
     name: "update_person_tags",
-    description: "Add tags to a contact in Follow Up Boss (e.g. PieDay2025). Existing tags are always kept; this never removes a tag. Only use it when AJ asks to tag someone.",
-    inputSchema: { type: "object", properties: { personId, tags: { type: "array", items: { type: "string" }, description: "Tags to add, e.g. [\"PieDay2025\"]" } }, required: ["personId", "tags"] },
+    description: "Add tags to one contact (personId) or many at once (personIds, up to 500) in Follow Up Boss (e.g. PieDay2025). Existing tags are always kept; this never removes a tag. Only use it when AJ asks to tag someone.",
+    inputSchema: { type: "object", properties: {
+      personId,
+      personIds: { type: "array", items: { type: "integer" }, maxItems: 500, description: "Several Follow Up Boss contact ids to tag at once (from search_people)" },
+      tags: { type: "array", items: { type: "string" }, description: "Tags to add, e.g. [\"PieDay2025\"]" }
+    }, required: ["tags"] },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+    write: true,
+    run: async (a) => {
+      const add = tagList(a, "tags");
+      const one = need(a, "personId", "integer", { optional: true });
+      const many = a.personIds;
+      if (many !== undefined && (!Array.isArray(many) || !many.length || many.length > 500 || !many.every(Number.isInteger)))
+        throw new InputError('"personIds" must be a list of 1 to 500 contact ids.');
+      if ((one === undefined) === (many === undefined)) throw new InputError('Pass either "personId" or "personIds".');
+      const tagOne = async (id) => {
+        // A plain PUT replaces every tag on the contact. mergeTags=true tells Follow Up Boss to
+        // add instead, and we also send the existing tags, so nothing is lost even if it were ignored.
+        const before = (await fub(`/people/${id}`)).tags || [];
+        const lower = new Set(before.map((t) => String(t).toLowerCase()));
+        const added = add.filter((t) => !lower.has(t.toLowerCase()));
+        if (!added.length) return { personId: id, added: [], tags: before, note: "The contact already had these tags." };
+        const after = await fub(`/people/${id}`, { method: "PUT", query: { mergeTags: true }, body: { tags: [...before, ...added] } });
+        const missing = before.filter((t) => !(after.tags || []).includes(t));
+        if (missing.length) throw new Error(`Follow Up Boss dropped existing tags: ${missing.join(", ")}. Check this contact.`);
+        return { personId: id, added, tags: after.tags || [] };
+      };
+      if (one !== undefined) return tagOne(one);
+      // One at a time, so Follow Up Boss's rate limit isn't hit; one failure doesn't stop the rest.
+      const ids = [...new Set(many)];
+      const tagged = []; const already = []; const failed = [];
+      for (const id of ids) {
+        try { const r = await tagOne(id); (r.added.length ? tagged : already).push(id); }
+        catch (e) { failed.push({ personId: id, error: String(e?.message || e).slice(0, 200) }); }
+      }
+      return { tags: add, requested: ids.length, tagged: tagged.length, alreadyTagged: already.length, failed };
+    }
+  },
+  {
+    name: "set_person_stage",
+    description: "Move a contact to a different stage in Follow Up Boss (e.g. \"180 day sphere\"). The stage must match one of the account's stages; the error lists them if it doesn't. Only use it when AJ asks.",
+    inputSchema: { type: "object", properties: { personId, stage: { type: "string", description: "Stage name, e.g. \"180 day sphere\"" } }, required: ["personId", "stage"] },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
     write: true,
     run: async (a) => {
       const id = need(a, "personId", "integer");
-      const add = tagList(a, "tags");
-      // A plain PUT replaces every tag on the contact. mergeTags=true tells Follow Up Boss to
-      // add instead, and we also send the existing tags, so nothing is lost even if it were ignored.
-      const before = (await fub(`/people/${id}`)).tags || [];
-      const lower = new Set(before.map((t) => String(t).toLowerCase()));
-      const added = add.filter((t) => !lower.has(t.toLowerCase()));
-      if (!added.length) return { personId: id, added: [], tags: before, note: "The contact already had these tags." };
-      const after = await fub(`/people/${id}`, { method: "PUT", query: { mergeTags: true }, body: { tags: [...before, ...added] } });
-      const missing = before.filter((t) => !(after.tags || []).includes(t));
-      if (missing.length) throw new Error(`Follow Up Boss dropped existing tags: ${missing.join(", ")}. Check this contact.`);
-      return { personId: id, added, tags: after.tags || [] };
+      const want = need(a, "stage", "string", { max: 100 }).trim();
+      const stages = ((await fub("/stages", { query: { limit: 100 } })).stages || []).map((s) => s.name).filter(Boolean);
+      const match = stages.find((s) => s.toLowerCase() === want.toLowerCase());
+      if (!match) throw new InputError(`No stage named "${want}". Stages: ${stages.join(", ")}`);
+      const before = (await fub(`/people/${id}`)).stage;
+      if (before === match) return { personId: id, stage: match, note: "The contact was already in this stage." };
+      const after = await fub(`/people/${id}`, { method: "PUT", body: { stage: match } });
+      return { personId: id, from: before, stage: after.stage };
     }
   },
   {
@@ -426,7 +463,7 @@ async function handle(msg) {
       return rpcResult(msg.id, {
         protocolVersion: PROTOCOLS.includes(asked) ? asked : PROTOCOLS[0],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.4.0" },
+        serverInfo: { name: "follow-up-boss", title: "Follow Up Boss", version: "1.5.0" },
         instructions: "Tools for AJ Pettersen's own Follow Up Boss account. Look people up with search_people before using an id." + (READ_ONLY ? " Read-only mode: write tools are turned off." : "")
       });
     }
